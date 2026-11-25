@@ -1,0 +1,14 @@
+[grid]
+datasets = ["mnist"]
+strategies = ["fedavg", "fedavgm", "fedprox"]
+partition_types = ["iid", "dirichlet"]
+alphas = [10.0, 1.0, 0.5, 0.1]
+local_epochs = [1, 5]
+num_clients = [10]
+seeds = [42, 43, 44]
+
+[base]
+num_rounds = 30
+batch_size = 32
+learning_rate = 0.01
+fraction_train = 1.0

@@ -52,8 +52,30 @@ class ResultWriter:
         statistics.to_csv(self.output_dir / "partition_statistics.csv", index=False)
         matrix.to_csv(self.output_dir / "partition_matrix.csv", index=False)
 
+    def write_attack_manifest(self, manifest: dict[str, Any]) -> None:
+        """Persist the simulation-only ground truth for a configured data attack."""
+        self.write_json("attack_manifest.json", manifest)
+
     def write_confusion_matrix(self, matrix: Any) -> None:
         pd.DataFrame(matrix).to_csv(self.output_dir / "final_confusion_matrix.csv", index=False)
+
+    def write_per_class_metrics(
+        self,
+        per_class_accuracy: dict[int, float],
+        per_class_loss: dict[int, float],
+        matrix: Any,
+    ) -> None:
+        """Persist final accuracy and cross-entropy loss for every true class."""
+        support = pd.DataFrame(matrix).sum(axis=1)
+        classes = sorted(set(per_class_accuracy) | set(per_class_loss))
+        pd.DataFrame(
+            {
+                "class_id": classes,
+                "support": [int(support.get(class_id, 0)) for class_id in classes],
+                "accuracy": [per_class_accuracy.get(class_id, 0.0) for class_id in classes],
+                "loss": [per_class_loss.get(class_id, 0.0) for class_id in classes],
+            }
+        ).to_csv(self.output_dir / "final_per_class_metrics.csv", index=False)
 
     def save_model(self, model: torch.nn.Module) -> None:
         if self.config.tracking.save_model:

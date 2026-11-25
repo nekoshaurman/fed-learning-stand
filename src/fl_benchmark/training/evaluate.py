@@ -23,6 +23,7 @@ class EvaluationResult:
     macro_f1: float
     num_examples: int
     per_class_accuracy: dict[int, float]
+    per_class_loss: dict[int, float]
     confusion_matrix: np.ndarray
     duration_seconds: float
 
@@ -31,24 +32,27 @@ def evaluate_model(model: nn.Module, dataloader: DataLoader, device: str | torch
     torch_device = torch.device(device)
     model.to(torch_device)
     model.eval()
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(reduction="none")
     total_loss = 0.0
     y_true: list[int] = []
     y_pred: list[int] = []
+    losses: list[float] = []
     start = time.perf_counter()
     with torch.no_grad():
         for inputs, labels in dataloader:
             inputs = inputs.to(torch_device)
             labels = labels.to(torch_device)
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            batch_losses = criterion(outputs, labels)
             preds = outputs.argmax(dim=1)
-            total_loss += float(loss.cpu()) * int(labels.numel())
+            total_loss += float(batch_losses.sum().cpu())
             y_true.extend(labels.cpu().numpy().astype(int).tolist())
             y_pred.extend(preds.cpu().numpy().astype(int).tolist())
+            losses.extend(batch_losses.cpu().numpy().astype(float).tolist())
     duration = time.perf_counter() - start
     y_true_arr = np.asarray(y_true, dtype=int)
     y_pred_arr = np.asarray(y_pred, dtype=int)
+    losses_arr = np.asarray(losses, dtype=float)
     num_classes = int(max(y_true_arr.max(initial=0), y_pred_arr.max(initial=0))) + 1
     matrix = confusion_matrix(y_true_arr, y_pred_arr, num_classes)
     return EvaluationResult(
@@ -57,6 +61,12 @@ def evaluate_model(model: nn.Module, dataloader: DataLoader, device: str | torch
         macro_f1=macro_f1_score(y_true_arr, y_pred_arr),
         num_examples=len(y_true),
         per_class_accuracy=per_class_accuracy(matrix),
+        per_class_loss={
+            int(class_id): float(losses_arr[y_true_arr == class_id].mean())
+            if np.any(y_true_arr == class_id)
+            else 0.0
+            for class_id in range(num_classes)
+        },
         confusion_matrix=matrix,
         duration_seconds=duration,
     )

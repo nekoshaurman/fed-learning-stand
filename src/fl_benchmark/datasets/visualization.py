@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+import matplotlib
 import pandas as pd
+
+if "ipykernel" not in sys.modules:
+    matplotlib.use("Agg")
+
 from matplotlib import pyplot as plt
 
 

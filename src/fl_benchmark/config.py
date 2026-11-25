@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 DatasetName = Literal["mnist", "cifar10", "cifar100"]
 PartitionType = Literal["iid", "dirichlet", "pathological", "quantity"]
 StrategyName = Literal["fedavg", "fedavgm", "fedprox"]
+AttackName = Literal["none", "label_flip", "multi_label_flip", "feature_noise"]
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,21 @@ class StrategyConfig:
 
 
 @dataclass(frozen=True)
+class AttackConfig:
+    """Settings for a data-poisoning attack in a local simulation."""
+
+    enabled: bool = False
+    type: AttackName = "none"
+    malicious_fraction: float = 0.0
+    poison_fraction: float = 0.0
+    source_label: int = 0
+    target_label: int = 1
+    label_flips: tuple[tuple[int, int], ...] = ()
+    noise_std: float = 0.0
+    seed: int = 42
+
+
+@dataclass(frozen=True)
 class TrackingConfig:
     output_dir: Path
     save_client_metrics: bool = True
@@ -84,6 +100,7 @@ class ExperimentConfig:
     federation: FederationConfig
     strategy: StrategyConfig
     tracking: TrackingConfig
+    attack: AttackConfig = field(default_factory=AttackConfig)
     target_accuracy: float | None = None
     source_path: Path | None = None
 
@@ -134,6 +151,9 @@ def load_config(path: Path | str) -> ExperimentConfig:
         save_model=tracking.save_model,
         experiment_name=tracking.experiment_name,
     )
+    attack_raw = dict(raw.get("attack", {}))
+    if "label_flips" in attack_raw:
+        attack_raw["label_flips"] = tuple(tuple(pair) for pair in attack_raw["label_flips"])
     config = ExperimentConfig(
         name=str(exp["name"]),
         target_accuracy=exp.get("target_accuracy"),
@@ -144,6 +164,7 @@ def load_config(path: Path | str) -> ExperimentConfig:
         federation=FederationConfig(**_require_table(raw, "federation")),
         strategy=StrategyConfig(**_require_table(raw, "strategy")),
         tracking=tracking,
+        attack=AttackConfig(**attack_raw),
         source_path=config_path.resolve(),
     )
     validate_config(config)
@@ -165,3 +186,40 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("training.local_epochs and batch_size must be positive")
     if config.model.num_classes <= 1:
         raise ValueError("model.num_classes must be greater than one")
+    attack = config.attack
+    if not 0 <= attack.malicious_fraction <= 1:
+        raise ValueError("attack.malicious_fraction must be in [0, 1]")
+    if not 0 <= attack.poison_fraction <= 1:
+        raise ValueError("attack.poison_fraction must be in [0, 1]")
+    if attack.noise_std < 0:
+        raise ValueError("attack.noise_std must be non-negative")
+    if attack.enabled and attack.type == "none":
+        raise ValueError("attack.type must be set when attack.enabled is true")
+    if attack.type == "label_flip":
+        if not 0 <= attack.source_label < config.model.num_classes:
+            raise ValueError("attack.source_label must be a valid model class")
+        if not 0 <= attack.target_label < config.model.num_classes:
+            raise ValueError("attack.target_label must be a valid model class")
+        if attack.source_label == attack.target_label:
+            raise ValueError("attack.source_label and attack.target_label must differ")
+    if attack.type == "multi_label_flip":
+        if len(attack.label_flips) < 2:
+            raise ValueError("attack.label_flips must contain at least two mappings for multi_label_flip")
+        flat_labels: list[int] = []
+        for pair in attack.label_flips:
+            if len(pair) != 2:
+                raise ValueError("each attack.label_flips item must contain [source_label, target_label]")
+            source_label, target_label = pair
+            if not isinstance(source_label, int) or not isinstance(target_label, int):
+                raise ValueError("attack.label_flips labels must be integers")
+            if not 0 <= source_label < config.model.num_classes:
+                raise ValueError("attack.label_flips source_label must be a valid model class")
+            if not 0 <= target_label < config.model.num_classes:
+                raise ValueError("attack.label_flips target_label must be a valid model class")
+            if source_label == target_label:
+                raise ValueError("attack.label_flips source and target labels must differ")
+            flat_labels.extend((source_label, target_label))
+        if len(set(flat_labels)) != len(flat_labels):
+            raise ValueError("attack.label_flips mappings must not share source or target classes")
+    if attack.type == "feature_noise" and attack.enabled and attack.noise_std <= 0:
+        raise ValueError("attack.noise_std must be positive for feature_noise")

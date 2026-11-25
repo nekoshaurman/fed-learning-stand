@@ -4,9 +4,10 @@ from typing import Any, cast
 
 import torch
 
+from fl_benchmark.attacks.label_flip import build_label_flip_plan, make_client_dataset
 from fl_benchmark.config import load_config
-from fl_benchmark.datasets.loader import load_datasets, make_client_dataloader, make_dataloader
-from fl_benchmark.datasets.partitioning import create_partitions
+from fl_benchmark.datasets.loader import load_datasets, make_dataloader
+from fl_benchmark.datasets.partitioning import create_partitions, get_targets
 from fl_benchmark.models.factory import create_model, get_model_parameters, set_model_parameters
 from fl_benchmark.training.evaluate import evaluate_model
 from fl_benchmark.training.train import train_model
@@ -20,12 +21,14 @@ def _client_fn(context: Any) -> Any:
     partition_id = int(context.node_config.get("partition-id", context.node_config.get("partition_id", 0)))
     bundle = load_datasets(config.dataset)
     partitions = create_partitions(cast(Any, bundle.train), config.partition)
+    attack_plan = build_label_flip_plan(get_targets(cast(Any, bundle.train)), partitions, config.attack)
 
     class BenchmarkClient(NumPyClient):
         def fit(self, parameters: list[Any], fit_config: dict[str, Any]) -> tuple[list[Any], int, dict[str, Any]]:
             model = create_model(config.model, config.dataset.name)
             set_model_parameters(model, parameters)
-            loader = make_client_dataloader(bundle.train, partitions[partition_id], config.training)
+            client_dataset = make_client_dataset(bundle.train, partitions[partition_id], attack_plan, partition_id)
+            loader = make_dataloader(client_dataset, config.training, shuffle=True)
             optimizer = torch.optim.SGD(
                 model.parameters(),
                 lr=config.training.learning_rate,
@@ -48,6 +51,8 @@ def _client_fn(context: Any) -> Any:
                 "train_duration": result.duration_seconds,
                 "num_examples": result.num_examples,
                 "partition_id": partition_id,
+                "is_malicious": attack_plan.is_malicious(partition_id),
+                "num_poisoned_examples": len(attack_plan.poisoned_indices.get(partition_id, ())),
             }
             if prox_mu > 0:
                 metrics["proximal_loss"] = result.proximal_loss

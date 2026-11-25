@@ -1,0 +1,56 @@
+[experiment]
+name = "mnist-strong-feature-noise-dirichlet"
+target_accuracy = 0.90
+
+[dataset]
+name = "mnist"
+data_dir = "./data"
+download = true
+num_workers = 0
+
+[partition]
+type = "dirichlet"
+num_clients = 10
+alpha = 0.5
+min_partition_size = 20
+seed = 42
+
+[model]
+name = "mnist-cnn"
+num_classes = 10
+
+[training]
+batch_size = 32
+local_epochs = 1
+learning_rate = 0.01
+momentum = 0.9
+weight_decay = 0.0
+device = "cpu"
+seed = 42
+
+[federation]
+num_rounds = 5
+fraction_train = 1.0
+fraction_evaluate = 1.0
+min_available_clients = 10
+min_train_clients = 10
+min_evaluate_clients = 10
+
+[strategy]
+name = "fedavg"
+
+[attack]
+# Stress test: 8 из 10 клиентов добавляют сильный гауссов шум ко всем своим примерам.
+# Значение noise_std задано в нормализованном пространстве входных данных MNIST.
+enabled = true
+type = "feature_noise"
+malicious_fraction = 0.8
+poison_fraction = 1.0
+noise_std = 3.0
+seed = 42
+
+[tracking]
+output_dir = "./results"
+save_client_metrics = true
+save_model = true
+experiment_name = "mnist-strong-feature-noise-dirichlet"

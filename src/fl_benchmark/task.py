@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import math
+import sys
 import time
 from collections.abc import Sized
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import torch
-from matplotlib import pyplot as plt
 from torch.utils.data import Subset, TensorDataset
 
+if "ipykernel" not in sys.modules:
+    matplotlib.use("Agg")
+
+from matplotlib import pyplot as plt
+
+from fl_benchmark.attacks.label_flip import LabelFlipPlan, build_label_flip_plan, make_client_dataset
 from fl_benchmark.config import ExperimentConfig
-from fl_benchmark.datasets.loader import load_datasets, make_client_dataloader, make_dataloader
+from fl_benchmark.datasets.loader import load_datasets, make_dataloader
 from fl_benchmark.datasets.partitioning import create_partitions, get_targets
 from fl_benchmark.datasets.statistics import compute_partition_statistics
 from fl_benchmark.datasets.visualization import save_partition_plots
@@ -47,7 +54,12 @@ def _sample_clients(config: ExperimentConfig, round_num: int) -> list[int]:
     return sorted(rng.choice(config.partition.num_clients, size=num, replace=False).astype(int).tolist())
 
 
-def _summary(config: ExperimentConfig, rounds: pd.DataFrame, partition_stats: pd.DataFrame) -> dict[str, Any]:
+def _summary(
+    config: ExperimentConfig,
+    rounds: pd.DataFrame,
+    partition_stats: pd.DataFrame,
+    attack_plan: LabelFlipPlan,
+) -> dict[str, Any]:
     final = rounds.iloc[-1] if len(rounds) else {}
     best_idx = int(rounds["global_accuracy"].idxmax()) if len(rounds) else 0
     best = rounds.loc[best_idx] if len(rounds) else {}
@@ -77,6 +89,10 @@ def _summary(config: ExperimentConfig, rounds: pd.DataFrame, partition_stats: pd
         "client_accuracy_max": float(client_acc.max()) if len(client_acc) else 0.0,
         "mean_partition_entropy": float(partition_stats["entropy"].mean()),
         "mean_partition_js_divergence": float(partition_stats["js_divergence"].mean()),
+        "attack_enabled": config.attack.enabled,
+        "attack_type": config.attack.type,
+        "num_malicious_clients": len(attack_plan.malicious_clients),
+        "total_poisoned_examples": attack_plan.total_poisoned_examples,
     }
 
 
@@ -135,9 +151,11 @@ def run_local_simulation(
     partitions = create_partitions(cast(Any, train_dataset), config.partition)
     targets = get_targets(cast(Any, train_dataset))
     partition_stats = compute_partition_statistics(targets, partitions, config.model.num_classes)
+    attack_plan = build_label_flip_plan(targets, partitions, config.attack)
     exp_id = experiment_id or create_experiment_id(config.name, config.training.seed)
     writer = ResultWriter(config, exp_id)
     writer.write_partition(partition_stats.statistics, partition_stats.matrix)
+    writer.write_attack_manifest(attack_plan.manifest())
     save_partition_plots(partition_stats.statistics, partition_stats.matrix, writer.output_dir)
 
     global_model = create_model(config.model, config.dataset.name)
@@ -154,7 +172,8 @@ def run_local_simulation(
             for cid in selected:
                 model = create_model(config.model, config.dataset.name)
                 set_model_parameters(model, global_parameters)
-                loader = make_client_dataloader(train_dataset, partitions[cid], config.training)
+                client_dataset = make_client_dataset(train_dataset, partitions[cid], attack_plan, cid)
+                loader = make_dataloader(client_dataset, config.training, shuffle=True)
                 optimizer = torch.optim.SGD(
                     model.parameters(),
                     lr=config.training.learning_rate,
@@ -182,6 +201,8 @@ def run_local_simulation(
                         "train_duration": result.duration_seconds,
                         "num_examples": result.num_examples,
                         "proximal_loss": result.proximal_loss,
+                        "is_malicious": attack_plan.is_malicious(cid),
+                        "num_poisoned_examples": len(attack_plan.poisoned_indices.get(cid, ())),
                     }
                 )
             aggregated = weighted_average(updates)
@@ -224,10 +245,15 @@ def run_local_simulation(
             )
         final_eval = evaluate_model(global_model, test_loader, config.training.device)
         writer.write_confusion_matrix(final_eval.confusion_matrix)
+        writer.write_per_class_metrics(
+            final_eval.per_class_accuracy,
+            final_eval.per_class_loss,
+            final_eval.confusion_matrix,
+        )
         writer.save_model(global_model)
         rounds = pd.read_csv(writer.output_dir / "round_metrics.csv")
         _save_training_curves(rounds, writer.output_dir)
-        writer.finish("completed", _summary(config, rounds, partition_stats.statistics))
+        writer.finish("completed", _summary(config, rounds, partition_stats.statistics, attack_plan))
         return writer.output_dir
     except Exception as exc:
         writer.finish("failed", {"error": str(exc)})
